@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"runtime"
+	"strings"
 	"testing"
 
 	remoteexec "github.com/go-remoteexec/transport"
@@ -145,3 +146,35 @@ var errTransport = &transportErr{"boom"}
 type transportErr struct{ msg string }
 
 func (e *transportErr) Error() string { return e.msg }
+
+// TestParseEnvAndFactIsolation: the probe emits the environment last,
+// every line prefixed, and the fact parser stops before it — so a
+// variable whose VALUE spans lines cannot have its continuation read
+// back as a fact. A host could otherwise name its own facts just by
+// exporting one.
+func TestParseEnvAndFactIsolation(t *testing.T) {
+	stdout := "system='Darwin'\nhostname='h1'\n" +
+		"ENV HOME=/root\n" +
+		"ENV PATH=/usr/bin:/bin\n" +
+		"ENV EQUALS=a=b\n" +
+		"ENV EVIL=first\nsystem='pwned'\n"
+
+	facts, _, _ := strings.Cut(stdout, "\nENV ")
+	raw := parseKV(facts)
+	if raw["system"] != "Darwin" {
+		t.Errorf("system = %q, want it untouched by the environment", raw["system"])
+	}
+
+	env := parseEnv(stdout)
+	if env["HOME"] != "/root" {
+		t.Errorf("HOME = %v", env["HOME"])
+	}
+	// Split on the FIRST "=", so a value containing one survives.
+	if env["EQUALS"] != "a=b" {
+		t.Errorf("EQUALS = %v, want %q", env["EQUALS"], "a=b")
+	}
+	// The continuation of a multi-line value is not a variable.
+	if _, ok := env["system'"]; ok {
+		t.Error("a continuation line was read as a variable")
+	}
+}
