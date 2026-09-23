@@ -37,7 +37,14 @@ elif [ "$(uname -s)" = "Darwin" ]; then
 fi
 p nproc "$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null)"
 p user_id "$(id -un 2>/dev/null)"
+p effective_user_id "$(id -u 2>/dev/null)"
+p effective_group_id "$(id -g 2>/dev/null)"
+p distribution_release "$(if [ -f /etc/os-release ]; then . /etc/os-release && echo "$VERSION_CODENAME"; else uname -r; fi)"
+p memtotal_kb "$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || (sysctl -n hw.memsize 2>/dev/null | awk '{print int($1/1024)}'))"
 p pkg_mgr "$(command -v apt-get >/dev/null 2>&1 && echo apt || (command -v dnf >/dev/null 2>&1 && echo dnf) || (command -v yum >/dev/null 2>&1 && echo yum) || (command -v brew >/dev/null 2>&1 && echo brew) || echo unknown)"
+# LAST, and every line prefixed: a value spanning lines cannot then
+# be read back as one of the facts above. parseKV stops here.
+env | sed 's/^/ENV /'
 `
 
 // Gather probes conn for a portable subset of Ansible's ansible_facts:
@@ -58,23 +65,50 @@ func Gather(ctx context.Context, conn remoteexec.Connection) (map[string]any, er
 		return nil, fmt.Errorf("facts: gathering: exit %d: %s", res.RC, strings.TrimSpace(res.Stderr))
 	}
 
-	raw := parseKV(res.Stdout)
+	// Everything before the first ENV line. An environment variable
+	// whose value spans lines would otherwise have its continuation
+	// read as a fact — a host could name a fact by exporting one.
+	facts, _, _ := strings.Cut(res.Stdout, "\nENV ")
+	raw := parseKV(facts)
 
 	out := map[string]any{
-		"system":       raw["system"],
-		"kernel":       raw["kernel"],
-		"architecture": raw["architecture"],
-		"hostname":     raw["hostname"],
-		"fqdn":         raw["fqdn"],
-		"user_id":      raw["user_id"],
-		"pkg_mgr":      raw["pkg_mgr"],
-		"os_family":    osFamily(raw["distribution"], raw["distribution_id_like"], raw["system"]),
+		// Real sets both on every gathered host; a playbook reads
+		// gather_subset to know what it asked for.
+		"_ansible_facts_gathered": true,
+		"gather_subset":           []any{"all"},
+		"env":                     parseEnv(res.Stdout),
+		"system":                  raw["system"],
+		"kernel":                  raw["kernel"],
+		"architecture":            raw["architecture"],
+		"hostname":                raw["hostname"],
+		"fqdn":                    raw["fqdn"],
+		"user_id":                 raw["user_id"],
+		"pkg_mgr":                 raw["pkg_mgr"],
+		"os_family":               osFamily(raw["distribution"], raw["distribution_id_like"], raw["system"]),
 	}
 	if raw["distribution"] != "" {
 		out["distribution"] = raw["distribution"]
 	}
 	if raw["distribution_version"] != "" {
 		out["distribution_version"] = raw["distribution_version"]
+		// The part before the first dot — what a `when:` compares
+		// against to branch on a major release.
+		major, _, _ := strings.Cut(raw["distribution_version"], ".")
+		out["distribution_major_version"] = major
+	}
+	if raw["distribution_release"] != "" {
+		out["distribution_release"] = raw["distribution_release"]
+	}
+	for _, k := range []string{"effective_user_id", "effective_group_id"} {
+		if raw[k] != "" {
+			out[k] = raw[k]
+		}
+	}
+	// The fqdn minus the hostname, empty when the host has no domain —
+	// real reports an empty string there rather than omitting it.
+	out["domain"] = strings.TrimPrefix(strings.TrimPrefix(raw["fqdn"], raw["hostname"]), ".")
+	if kb, err := strconv.Atoi(raw["memtotal_kb"]); err == nil && kb > 0 {
+		out["memtotal_mb"] = kb / 1024
 	}
 	if n, err := strconv.Atoi(raw["nproc"]); err == nil {
 		out["processor_vcpus"] = n
@@ -126,6 +160,29 @@ func parseKV(s string) map[string]string {
 		}
 		val = strings.TrimSuffix(strings.TrimPrefix(val, "'"), "'")
 		out[key] = val
+	}
+	return out
+}
+
+// parseEnv reads the ENV-prefixed lines the probe emits, one
+// environment variable each, splitting on the FIRST "=" so a value
+// containing one survives.
+//
+// A value spanning several lines is skipped rather than truncated: its
+// continuation is indistinguishable from the next variable, and half a
+// value is worse than none.
+func parseEnv(stdout string) map[string]any {
+	out := map[string]any{}
+	for _, line := range strings.Split(stdout, "\n") {
+		rest, ok := strings.CutPrefix(line, "ENV ")
+		if !ok {
+			continue
+		}
+		name, value, found := strings.Cut(rest, "=")
+		if !found || name == "" {
+			continue
+		}
+		out[name] = value
 	}
 	return out
 }
