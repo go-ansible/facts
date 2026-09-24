@@ -40,9 +40,22 @@ p nproc "$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || sysctl 
 p user_id "$(id -un 2>/dev/null)"
 p effective_user_id "$(id -u 2>/dev/null)"
 p effective_group_id "$(id -g 2>/dev/null)"
+p real_user_id "$(id -ru 2>/dev/null || id -u 2>/dev/null)"
+p real_group_id "$(id -rg 2>/dev/null || id -g 2>/dev/null)"
 p distribution_release "$(if [ -f /etc/os-release ]; then . /etc/os-release && echo "$VERSION_CODENAME"; else uname -r; fi)"
 p memtotal_kb "$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || (sysctl -n hw.memsize 2>/dev/null | awk '{print int($1/1024)}'))"
 p pkg_mgr "$(command -v apt-get >/dev/null 2>&1 && echo apt || (command -v dnf >/dev/null 2>&1 && echo dnf) || (command -v yum >/dev/null 2>&1 && echo yum) || (command -v brew >/dev/null 2>&1 && echo brew) || echo unknown)"
+p nodename "$(uname -n)"
+p machine "$(uname -m)"
+p kernel_version "$(uname -v)"
+p user_dir "$HOME"
+p user_shell "$SHELL"
+p user_uid "$(id -u 2>/dev/null)"
+p user_gid "$(id -g 2>/dev/null)"
+p processor_cores "$(sysctl -n hw.physicalcpu 2>/dev/null || lscpu -p=Core 2>/dev/null | grep -vc '^#' || echo)"
+p uptime_seconds "$(if [ -r /proc/uptime ]; then cut -d. -f1 /proc/uptime; else boot=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*sec = \([0-9]*\).*/\1/p'); [ -n "$boot" ] && echo $(( $(date +%s) - boot )); fi)"
+p memfree_mb "$(awk '/^MemAvailable:/{print int($2/1024)}' /proc/meminfo 2>/dev/null || (pages=$(vm_stat 2>/dev/null | awk '/Pages free/{gsub(/\./,"",$3); print $3}'); [ -n "$pages" ] && echo $(( pages * 4096 / 1048576 )) ))"
+p service_mgr "$(if [ -d /run/systemd/system ]; then echo systemd; elif command -v launchctl >/dev/null 2>&1; then echo launchd; elif [ -f /sbin/init ]; then echo sysvinit; else echo unknown; fi)"
 # --- network ---------------------------------------------------------
 # The DEFAULT route's interface and that interface's address. Both
 # toolchains are handled because neither exists on the other: "ip" on
@@ -128,7 +141,24 @@ func Gather(ctx context.Context, conn remoteexec.Connection) (map[string]any, er
 	if raw["distribution_release"] != "" {
 		out["distribution_release"] = raw["distribution_release"]
 	}
-	for _, k := range []string{"effective_user_id", "effective_group_id"} {
+	// Measured, and worth stating because two of these read backwards:
+	// real reports the ID fields as INTEGERS and the processor counts
+	// and date_time.epoch as STRINGS. This port had effective_user_id
+	// a string and processor_vcpus and epoch integers, so a comparison
+	// against any of them behaved differently from real's.
+	for _, k := range []string{
+		"effective_user_id", "effective_group_id",
+		"user_uid", "user_gid", "real_user_id", "real_group_id",
+		"memfree_mb", "uptime_seconds",
+	} {
+		if n, err := strconv.Atoi(raw[k]); err == nil {
+			out[k] = n
+		}
+	}
+	for _, k := range []string{
+		"nodename", "machine", "kernel_version", "user_dir", "user_shell",
+		"service_mgr", "processor_cores",
+	} {
 		if raw[k] != "" {
 			out[k] = raw[k]
 		}
@@ -148,11 +178,11 @@ func Gather(ctx context.Context, conn remoteexec.Connection) (map[string]any, er
 	if d4 := defaultIPv4(raw); len(d4) > 0 {
 		out["default_ipv4"] = d4
 	}
-	if n, err := strconv.Atoi(raw["nproc"]); err == nil {
-		out["processor_vcpus"] = n
+	if raw["nproc"] != "" {
+		out["processor_vcpus"] = raw["nproc"]
 	}
-	if epoch, err := strconv.ParseInt(raw["date_time_epoch"], 10, 64); err == nil {
-		out["date_time"] = map[string]any{"epoch": epoch}
+	if raw["date_time_epoch"] != "" {
+		out["date_time"] = map[string]any{"epoch": raw["date_time_epoch"]}
 	}
 	return out, nil
 }
