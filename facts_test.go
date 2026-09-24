@@ -46,11 +46,21 @@ func TestGatherLocal(t *testing.T) {
 	if !ok {
 		t.Fatalf("date_time = %#v, want a map", f["date_time"])
 	}
-	if _, ok := dt["epoch"].(int64); !ok {
-		t.Errorf("date_time.epoch = %#v, want int64", dt["epoch"])
+	// STRINGS, both of them — this asserted int64 and int, which was
+	// this port's own shape rather than the reference's. Measured
+	// against real ansible-core 2.21.4, where date_time.epoch and
+	// processor_vcpus come back as str and the ID fields as int; two
+	// of the three read backwards from what one would guess.
+	if _, ok := dt["epoch"].(string); !ok {
+		t.Errorf("date_time.epoch = %#v, want a string", dt["epoch"])
 	}
-	if _, ok := f["processor_vcpus"].(int); !ok {
-		t.Errorf("processor_vcpus = %#v, want int", f["processor_vcpus"])
+	if _, ok := f["processor_vcpus"].(string); !ok {
+		t.Errorf("processor_vcpus = %#v, want a string", f["processor_vcpus"])
+	}
+	for _, k := range []string{"effective_user_id", "effective_group_id", "user_uid", "user_gid"} {
+		if _, ok := f[k].(int); !ok {
+			t.Errorf("%s = %#v, want an int", k, f[k])
+		}
 	}
 }
 
