@@ -7,6 +7,7 @@ package facts
 import (
 	"context"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 
@@ -42,6 +43,34 @@ p effective_group_id "$(id -g 2>/dev/null)"
 p distribution_release "$(if [ -f /etc/os-release ]; then . /etc/os-release && echo "$VERSION_CODENAME"; else uname -r; fi)"
 p memtotal_kb "$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || (sysctl -n hw.memsize 2>/dev/null | awk '{print int($1/1024)}'))"
 p pkg_mgr "$(command -v apt-get >/dev/null 2>&1 && echo apt || (command -v dnf >/dev/null 2>&1 && echo dnf) || (command -v yum >/dev/null 2>&1 && echo yum) || (command -v brew >/dev/null 2>&1 && echo brew) || echo unknown)"
+# --- network ---------------------------------------------------------
+# The DEFAULT route's interface and that interface's address. Both
+# toolchains are handled because neither exists on the other: "ip" on
+# Linux, "route"/"ifconfig" on BSD and macOS.
+if command -v ip >/dev/null 2>&1; then
+  def_line=$(ip -4 route show default 2>/dev/null | head -1)
+  ifc=$(echo "$def_line" | sed -n 's/.* dev \([^ ]*\).*/\1/p')
+  p net_interface "$ifc"
+  p net_gateway "$(echo "$def_line" | sed -n 's/.*default via \([^ ]*\).*/\1/p')"
+  if [ -n "$ifc" ]; then
+    p net_cidr "$(ip -4 -o addr show dev "$ifc" 2>/dev/null | awk '{print $4}' | head -1)"
+    p net_macaddress "$(cat /sys/class/net/"$ifc"/address 2>/dev/null)"
+    p net_mtu "$(cat /sys/class/net/"$ifc"/mtu 2>/dev/null)"
+  fi
+  p net_all_ipv4 "$(ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -v '^127\.' | tr '\n' ' ')"
+  p net_interfaces "$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | tr '\n' ' ')"
+elif command -v ifconfig >/dev/null 2>&1; then
+  ifc=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
+  p net_interface "$ifc"
+  p net_gateway "$(route -n get default 2>/dev/null | awk '/gateway:/{print $2}')"
+  if [ -n "$ifc" ]; then
+    p net_cidr "$(ifconfig "$ifc" 2>/dev/null | awk '/inet /{print $2" "$4; exit}')"
+    p net_macaddress "$(ifconfig "$ifc" 2>/dev/null | awk '/ether /{print $2; exit}')"
+    p net_mtu "$(ifconfig "$ifc" 2>/dev/null | sed -n 's/.*mtu \([0-9]*\).*/\1/p' | head -1)"
+  fi
+  p net_all_ipv4 "$(ifconfig 2>/dev/null | awk '/inet /{print $2}' | grep -v '^127\.' | tr '\n' ' ')"
+  p net_interfaces "$(ifconfig -l 2>/dev/null)"
+fi
 # LAST, and every line prefixed: a value spanning lines cannot then
 # be read back as one of the facts above. parseKV stops here.
 env | sed 's/^/ENV /'
@@ -109,6 +138,15 @@ func Gather(ctx context.Context, conn remoteexec.Connection) (map[string]any, er
 	out["domain"] = strings.TrimPrefix(strings.TrimPrefix(raw["fqdn"], raw["hostname"]), ".")
 	if kb, err := strconv.Atoi(raw["memtotal_kb"]); err == nil && kb > 0 {
 		out["memtotal_mb"] = kb / 1024
+	}
+	if list := splitFields(raw["net_all_ipv4"]); len(list) > 0 {
+		out["all_ipv4_addresses"] = list
+	}
+	if list := splitFields(raw["net_interfaces"]); len(list) > 0 {
+		out["interfaces"] = list
+	}
+	if d4 := defaultIPv4(raw); len(d4) > 0 {
+		out["default_ipv4"] = d4
 	}
 	if n, err := strconv.Atoi(raw["nproc"]); err == nil {
 		out["processor_vcpus"] = n
@@ -185,4 +223,77 @@ func parseEnv(stdout string) map[string]any {
 		out[name] = value
 	}
 	return out
+}
+
+// splitFields turns a space-separated probe value into a list, which
+// is the shape real reports these in.
+func splitFields(s string) []any {
+	out := []any{}
+	for _, f := range strings.Fields(s) {
+		out = append(out, f)
+	}
+	return out
+}
+
+// defaultIPv4 assembles real's ansible_facts.default_ipv4 — the
+// address of the interface the DEFAULT ROUTE leaves by, which is what
+// a template means by "this host's IP".
+//
+// Only the keys both platforms can answer are reported. Real adds
+// several BSD-only ones on macOS (media, media_select, options,
+// status, flags) and a different set on Linux; inventing a common
+// value for those would be guessing, so they are absent rather than
+// wrong.
+func defaultIPv4(raw map[string]string) map[string]any {
+	addr, mask, ok := parseIPv4(raw["net_cidr"])
+	if !ok {
+		return nil
+	}
+	out := map[string]any{
+		"address": addr.String(),
+		"netmask": net.IP(mask).String(),
+		"network": addr.Mask(mask).String(),
+		"type":    "ether",
+	}
+	for key, value := range map[string]string{
+		"interface":  raw["net_interface"],
+		"gateway":    raw["net_gateway"],
+		"macaddress": raw["net_macaddress"],
+	} {
+		if value != "" {
+			out[key] = value
+		}
+	}
+	if mtu, err := strconv.Atoi(raw["net_mtu"]); err == nil {
+		out["mtu"] = mtu
+	}
+	return out
+}
+
+// parseIPv4 reads the two shapes the probe can produce, because the
+// two toolchains disagree: "192.168.1.152/24" from Linux's ip, and
+// "192.168.1.152 0xffffff00" from macOS's ifconfig, whose mask is
+// HEXADECIMAL and not an address at all.
+func parseIPv4(value string) (net.IP, net.IPMask, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil, false
+	}
+	if addr, cidr, err := net.ParseCIDR(value); err == nil {
+		return addr.To4(), cidr.Mask, addr.To4() != nil
+	}
+	addrText, maskText, found := strings.Cut(value, " ")
+	if !found {
+		return nil, nil, false
+	}
+	addr := net.ParseIP(strings.TrimSpace(addrText)).To4()
+	if addr == nil {
+		return nil, nil, false
+	}
+	bits, err := strconv.ParseUint(strings.TrimPrefix(strings.TrimSpace(maskText), "0x"), 16, 32)
+	if err != nil {
+		return nil, nil, false
+	}
+	mask := net.IPv4Mask(byte(bits>>24), byte(bits>>16), byte(bits>>8), byte(bits))
+	return addr, mask, true
 }
