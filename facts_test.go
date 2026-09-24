@@ -3,6 +3,8 @@ package facts
 import (
 	"context"
 	"io"
+	"net"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -176,5 +178,71 @@ func TestParseEnvAndFactIsolation(t *testing.T) {
 	// The continuation of a multi-line value is not a variable.
 	if _, ok := env["system'"]; ok {
 		t.Error("a continuation line was read as a variable")
+	}
+}
+
+// TestParseIPv4BothToolchains: the two toolchains disagree about how
+// an address and its mask are written, and one of them is not an
+// address at all — macOS's ifconfig gives a HEXADECIMAL mask.
+func TestParseIPv4BothToolchains(t *testing.T) {
+	for _, tc := range []struct {
+		in                     string
+		addr, netmask, network string
+	}{
+		// Linux, `ip -4 -o addr show`.
+		{"192.168.1.152/24", "192.168.1.152", "255.255.255.0", "192.168.1.0"},
+		{"10.0.5.7/8", "10.0.5.7", "255.0.0.0", "10.0.0.0"},
+		{"172.16.34.9/12", "172.16.34.9", "255.240.0.0", "172.16.0.0"},
+		// macOS, `ifconfig`: address and a hex mask, space separated.
+		{"192.168.1.152 0xffffff00", "192.168.1.152", "255.255.255.0", "192.168.1.0"},
+		{"10.0.5.7 0xff000000", "10.0.5.7", "255.0.0.0", "10.0.0.0"},
+		{"172.16.34.9 0xfff00000", "172.16.34.9", "255.240.0.0", "172.16.0.0"},
+	} {
+		addr, mask, ok := parseIPv4(tc.in)
+		if !ok {
+			t.Errorf("parseIPv4(%q) failed", tc.in)
+			continue
+		}
+		if addr.String() != tc.addr {
+			t.Errorf("%q: address = %s, want %s", tc.in, addr, tc.addr)
+		}
+		if got := net.IP(mask).String(); got != tc.netmask {
+			t.Errorf("%q: netmask = %s, want %s", tc.in, got, tc.netmask)
+		}
+		if got := addr.Mask(mask).String(); got != tc.network {
+			t.Errorf("%q: network = %s, want %s", tc.in, got, tc.network)
+		}
+	}
+	for _, bad := range []string{"", "not-an-address", "192.168.1.1", "192.168.1.1 zz", "::1/128"} {
+		if _, _, ok := parseIPv4(bad); ok {
+			t.Errorf("parseIPv4(%q) succeeded, want a refusal", bad)
+		}
+	}
+}
+
+// TestDefaultIPv4OmitsWhatItCannotAnswer: real reports several
+// platform-only keys (media, options, status on macOS). Inventing a
+// common value for those would be guessing, so they are absent — and
+// the keys that ARE reported must all be there.
+func TestDefaultIPv4OmitsWhatItCannotAnswer(t *testing.T) {
+	d4 := defaultIPv4(map[string]string{
+		"net_cidr":       "192.168.1.152 0xffffff00",
+		"net_interface":  "en0",
+		"net_gateway":    "192.168.1.254",
+		"net_macaddress": "6e:8f:60:25:76:16",
+		"net_mtu":        "1500",
+	})
+	want := map[string]any{
+		"address": "192.168.1.152", "netmask": "255.255.255.0",
+		"network": "192.168.1.0", "type": "ether", "interface": "en0",
+		"gateway": "192.168.1.254", "macaddress": "6e:8f:60:25:76:16",
+		"mtu": 1500,
+	}
+	if !reflect.DeepEqual(d4, want) {
+		t.Errorf("default_ipv4 =\n  %#v\nwant\n  %#v", d4, want)
+	}
+	// No default route, nothing to report.
+	if d4 := defaultIPv4(map[string]string{"net_interface": "en0"}); d4 != nil {
+		t.Errorf("default_ipv4 = %#v with no address, want nil", d4)
 	}
 }
