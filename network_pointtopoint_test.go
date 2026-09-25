@@ -141,7 +141,8 @@ func TestDefaultIPv4CarriesRealsFullShape(t *testing.T) {
 		"net_macaddress": "",
 		"net_mtu":        "1400",
 		"net_flags":      "UP,POINTOPOINT,RUNNING,MULTICAST",
-		"net_broadcast":  "10.215.8.136",
+		// Declared by nothing: the value below is COMPUTED.
+		"net_broadcast": "",
 	})
 	// Captured from real on the same host at the same moment.
 	want := map[string]any{
@@ -179,10 +180,11 @@ func TestDefaultIPv4TypeFromLoopbackFlag(t *testing.T) {
 	}
 }
 
-// The broadcast of a point-to-point interface is its PEER: real reads
-// the "--> peer" field there, where an ordinary interface has a
-// "broadcast" keyword. Both come out of the same probe line.
-func TestProbeReadsBroadcastFromEitherForm(t *testing.T) {
+// The probe reports only the broadcast an interface DECLARES. A
+// point-to-point interface declares none -- its "--> peer" field is
+// not a broadcast address, and real never reads it as one -- so the
+// probe yields nothing there and defaultIPv4 computes the value.
+func TestProbeReadsOnlyADeclaredBroadcast(t *testing.T) {
 	if _, err := exec.LookPath("awk"); err != nil {
 		t.Skip("awk not available")
 	}
@@ -192,7 +194,7 @@ func TestProbeReadsBroadcastFromEitherForm(t *testing.T) {
 		t.Fatal("could not find the net_broadcast awk program in probeScript")
 	}
 	for _, tc := range []struct{ name, input, want string }{
-		{"point-to-point peer", utunIfconfig, "10.215.8.136"},
+		{"point-to-point declares none", utunIfconfig, ""},
 		{"broadcast keyword", en0Ifconfig, "192.168.20.255"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -236,5 +238,38 @@ func TestProbeReadsFlagsFromTheInterfaceLine(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// The rule that reading the peer got right by luck. On the only
+// point-to-point interface available to measure -- a /32 -- the peer
+// and the computed broadcast are the same address, so both rules
+// agreed. On an ordinary tunnel they do not agree at all, and it is
+// the computed one real reports.
+func TestBroadcastIsComputedNotThePeer(t *testing.T) {
+	got := defaultIPv4(map[string]string{
+		"net_cidr":      "10.8.0.2 0xffffff00",
+		"net_interface": "utun9",
+		"net_flags":     "UP,POINTOPOINT,RUNNING,MULTICAST",
+		"net_broadcast": "", // a point-to-point interface declares none
+	})
+	if got["broadcast"] != "10.8.0.255" {
+		t.Errorf("broadcast = %#v, want \"10.8.0.255\" (address|~netmask); the peer would be 10.8.0.1", got["broadcast"])
+	}
+	if got["network"] != "10.8.0.0" {
+		t.Errorf("network = %#v, want \"10.8.0.0\"", got["network"])
+	}
+}
+
+// A declared broadcast is used as declared, never recomputed.
+func TestDeclaredBroadcastWins(t *testing.T) {
+	got := defaultIPv4(map[string]string{
+		"net_cidr":       "192.168.20.21 0xffffff00",
+		"net_interface":  "en0",
+		"net_macaddress": "c2:d8:98:70:02:54",
+		"net_broadcast":  "192.168.20.255",
+	})
+	if got["broadcast"] != "192.168.20.255" {
+		t.Errorf("broadcast = %#v", got["broadcast"])
 	}
 }

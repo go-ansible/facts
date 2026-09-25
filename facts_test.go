@@ -246,6 +246,9 @@ func TestDefaultIPv4OmitsWhatItCannotAnswer(t *testing.T) {
 		"address": "192.168.1.152", "netmask": "255.255.255.0",
 		"network": "192.168.1.0", "type": "ether", "interface": "en0",
 		"device": "en0", "gateway": "192.168.1.254",
+		// Computed from address and netmask, as real does when the
+		// interface declares none.
+		"broadcast":  "192.168.1.255",
 		"macaddress": "6e:8f:60:25:76:16",
 		// A STRING, as real reports it — see the type_debug
 		// measurement in network_pointtopoint_test.go.
