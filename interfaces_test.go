@@ -192,3 +192,69 @@ func TestBSDInterfacesWithNoInput(t *testing.T) {
 		t.Fatalf("got %v, want none", got)
 	}
 }
+
+// default_ipv4 is the default interface's WHOLE dict plus the route's
+// gateway plus the first address of that family -- real's
+// merge_default_interface. This port used to assemble a narrower dict
+// from separate probe values and matched real only while the default
+// route ran through a VPN tunnel, an interface with no media, no
+// status and no nd6 options: the four keys the hand-built version
+// could not produce were exactly the four that interface did not have.
+// The moment the route moved back to en0 they all appeared on real's
+// side and not on ours.
+func TestDefaultFromInterfaceCarriesEveryInterfaceKey(t *testing.T) {
+	ifaces := bsdInterfaces(ifconfigFixture)
+
+	d4 := defaultFromInterface(ifaces, "en0", "198.51.100.254", "ipv4")
+	want := map[string]any{
+		"interface": "en0", "gateway": "198.51.100.254",
+		"device": "en0",
+		"flags":  []string{"UP", "BROADCAST", "SMART", "RUNNING", "SIMPLEX", "MULTICAST"},
+		// Every key of the interface, including the four a hand-built
+		// dict had no way to produce.
+		"macaddress": "02:00:5e:10:00:01",
+		"media":      "Unknown", "media_select": "autoselect",
+		"mtu": "1500", "options": []string{"PERFORMNUD", "DAD"},
+		"status": "active", "type": "ether",
+		// ...and the first address of the family asked for.
+		"address": "198.51.100.21", "netmask": "255.255.255.0",
+		"network": "198.51.100.0", "broadcast": "198.51.100.255",
+	}
+	if !reflect.DeepEqual(d4, want) {
+		for _, k := range unionKeys(d4, want) {
+			if !reflect.DeepEqual(d4[k], want[k]) {
+				t.Errorf("default_ipv4[%q] = %#v, want %#v", k, d4[k], want[k])
+			}
+		}
+	}
+	// The address LISTS themselves are never copied across.
+	for _, k := range []string{"ipv4", "ipv6"} {
+		if _, ok := d4[k]; ok {
+			t.Errorf("default_ipv4 carries %q, which real excludes", k)
+		}
+	}
+
+	// Same interface, other family: the ipv6 entry's own fields.
+	d6 := defaultFromInterface(ifaces, "en0", "fe80::1%en0", "ipv6")
+	if d6["address"] != "fe80::dead:beef:cafe:0001%en0" || d6["prefix"] != "64" {
+		t.Errorf("default_ipv6 address/prefix = %#v/%#v", d6["address"], d6["prefix"])
+	}
+	if d6["gateway"] != "fe80::1%en0" {
+		t.Errorf("default_ipv6 gateway = %#v", d6["gateway"])
+	}
+
+	// An interface with no address of that family still yields the
+	// interface's keys -- gif0 has neither ipv4 nor ipv6.
+	if got := defaultFromInterface(ifaces, "gif0", "", "ipv4"); got["device"] != "gif0" {
+		t.Errorf("gif0 = %#v", got)
+	}
+
+	// No route, or a route naming an interface that was not parsed:
+	// nothing at all, so the caller can fall back.
+	if got := defaultFromInterface(ifaces, "", "gw", "ipv4"); got != nil {
+		t.Errorf("no interface gave %#v, want nil", got)
+	}
+	if got := defaultFromInterface(ifaces, "nosuch0", "gw", "ipv4"); got != nil {
+		t.Errorf("unknown interface gave %#v, want nil", got)
+	}
+}
