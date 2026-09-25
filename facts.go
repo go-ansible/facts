@@ -73,6 +73,7 @@ if command -v ip >/dev/null 2>&1; then
     p net_broadcast "$(ip -4 -o addr show dev "$ifc" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="brd") print $(i+1)}' | head -1)"
   fi
   p net_all_ipv4 "$(ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -v '^127\.' | tr '\n' ' ')"
+  p net_all_ipv6 "$(ip -6 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -vx -e '::1' -e 'fe80::1%lo0' | tr '\n' ' ')"
   p net_interfaces "$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | tr '\n' ' ')"
 elif command -v ifconfig >/dev/null 2>&1; then
   ifc=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
@@ -86,8 +87,28 @@ elif command -v ifconfig >/dev/null 2>&1; then
     p net_mtu "$(ifconfig "$ifc" 2>/dev/null | sed -n 's/.*mtu \([0-9]*\).*/\1/p' | head -1)"
   fi
   p net_all_ipv4 "$(ifconfig 2>/dev/null | awk '/inet /{print $2}' | grep -v '^127\.' | tr '\n' ' ')"
+  p net_all_ipv6 "$(ifconfig 2>/dev/null | awk '/inet6 /{print $2}' | grep -vx -e '::1' -e 'fe80::1%lo0' | tr '\n' ' ')"
   p net_interfaces "$(ifconfig -l 2>/dev/null)"
 fi
+# --- resolver, host keys, and the odds and ends -----------------------
+p dns_search "$(awk '/^search /{for(i=2;i<=NF;i++) printf "%s ", $i}' /etc/resolv.conf 2>/dev/null)"
+p dns_nameservers "$(awk '/^nameserver /{printf "%s ", $2}' /etc/resolv.conf 2>/dev/null)"
+p loadavg "$(if [ -r /proc/loadavg ]; then cut -d' ' -f1-3 /proc/loadavg; else sysctl -n vm.loadavg 2>/dev/null | tr -d '{}'; fi)"
+# The GECOS field. getent has no macOS equivalent, where the same value
+# lives in the directory service under RealName -- and dscl prints it on
+# a CONTINUATION line, hence the two-line read.
+gecos=$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f5)
+if [ -z "$gecos" ] && command -v dscl >/dev/null 2>&1; then
+  gecos=$(dscl . -read /Users/"$(id -un)" RealName 2>/dev/null | sed -n '2s/^ //p')
+fi
+p user_gecos "$gecos"
+for kt in dsa ecdsa ed25519 rsa; do
+  f=/etc/ssh/ssh_host_${kt}_key.pub
+  if [ -r "$f" ]; then
+    p sshkey_${kt}_type "$(awk '{print $1; exit}' "$f")"
+    p sshkey_${kt}_public "$(awk '{print $2; exit}' "$f")"
+  fi
+done
 # The whole ifconfig output, for the per-interface facts. Like the
 # environment below it is MULTI-LINE, so it is prefixed and placed
 # after every p-line: parseKV stops at the first IFC line. Only when
@@ -124,14 +145,20 @@ func Gather(ctx context.Context, conn remoteexec.Connection) (map[string]any, er
 	// read as a fact — a host could name a fact by exporting one.
 	beforeEnv, _, _ := strings.Cut(res.Stdout, "\nENV ")
 	facts, ifconfigOut, _ := strings.Cut(beforeEnv, "\nIFC ")
-	raw := parseKV(facts)
+	return assemble(parseKV(facts), ifconfigOut, parseEnv(res.Stdout)), nil
+}
 
+// assemble turns what the probe reported into the fact map. It is
+// separate from Gather so the mapping can be tested against values
+// measured from real Ansible without a connection to run a probe
+// over — which is most of what there is to get wrong here.
+func assemble(raw map[string]string, ifconfigOut string, env map[string]any) map[string]any {
 	out := map[string]any{
 		// Real sets both on every gathered host; a playbook reads
 		// gather_subset to know what it asked for.
 		"_ansible_facts_gathered": true,
 		"gather_subset":           []any{"all"},
-		"env":                     parseEnv(res.Stdout),
+		"env":                     env,
 		"system":                  raw["system"],
 		"kernel":                  raw["kernel"],
 		"architecture":            raw["architecture"],
@@ -191,6 +218,34 @@ func Gather(ctx context.Context, conn remoteexec.Connection) (map[string]any, er
 	if d4 := defaultIPv4(raw); len(d4) > 0 {
 		out["default_ipv4"] = d4
 	}
+	// module_setup marks that the setup module ran at all. Real sets
+	// it unconditionally when it gathers, and a playbook tests it to
+	// tell "facts gathered" from "gather_facts: false".
+	out["module_setup"] = true
+
+	if list := splitFields(raw["net_all_ipv6"]); len(list) > 0 {
+		out["all_ipv6_addresses"] = list
+	}
+	if g := raw["user_gecos"]; g != "" {
+		out["user_gecos"] = g
+	}
+	if la := parseLoadavg(raw["loadavg"]); la != nil {
+		out["loadavg"] = la
+	}
+	if dns := resolverFacts(raw); dns != nil {
+		out["dns"] = dns
+	}
+	// Real reports each host key twice: the blob itself, and the type
+	// that names it -- the two fields of the .pub file.
+	for _, kt := range []string{"dsa", "ecdsa", "ed25519", "rsa"} {
+		if pub := raw["sshkey_"+kt+"_public"]; pub != "" {
+			out["ssh_host_key_"+kt+"_public"] = pub
+		}
+		if t := raw["sshkey_"+kt+"_type"]; t != "" {
+			out["ssh_host_key_"+kt+"_public_keytype"] = t
+		}
+	}
+
 	// One fact per network interface, keyed by its own name, which is
 	// how a playbook reads ansible_facts.en0.ipv4[0].address. Present
 	// only where the probe could supply ifconfig output: see
@@ -204,7 +259,7 @@ func Gather(ctx context.Context, conn remoteexec.Connection) (map[string]any, er
 	if raw["date_time_epoch"] != "" {
 		out["date_time"] = map[string]any{"epoch": raw["date_time_epoch"]}
 	}
-	return out, nil
+	return out
 }
 
 // osFamily maps a distribution id (and, when set, its ID_LIKE family)
@@ -423,4 +478,49 @@ func hasFlag(flags []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// parseLoadavg turns the three load figures into real's own dict.
+//
+// The VALUES can differ from real's on Darwin, and only there: real
+// asks the C library, which hands back the kernel's raw fixed-point
+// number (9.203125), while a probe running in a shell can only read
+// sysctl, which prints two decimals (9.20). On Linux both end up
+// reading /proc/loadavg, which has two decimals itself, so both agree.
+// The alternative was not reporting the fact at all, which breaks a
+// playbook that merely compares it against a threshold.
+func parseLoadavg(raw string) map[string]any {
+	fields := strings.Fields(raw)
+	if len(fields) != 3 {
+		return nil
+	}
+	out := map[string]any{}
+	for i, key := range []string{"1m", "5m", "15m"} {
+		v, err := strconv.ParseFloat(fields[i], 64)
+		if err != nil {
+			return nil
+		}
+		out[key] = v
+	}
+	return out
+}
+
+// resolverFacts reports what /etc/resolv.conf declares, in real's
+// shape. Absent when the file named neither, rather than an empty
+// dict: real was measured with a resolver configured, and what it
+// reports without one was not.
+func resolverFacts(raw map[string]string) map[string]any {
+	search := splitFields(raw["dns_search"])
+	servers := splitFields(raw["dns_nameservers"])
+	if len(search) == 0 && len(servers) == 0 {
+		return nil
+	}
+	out := map[string]any{}
+	if len(search) > 0 {
+		out["search"] = search
+	}
+	if len(servers) > 0 {
+		out["nameservers"] = servers
+	}
+	return out
 }
