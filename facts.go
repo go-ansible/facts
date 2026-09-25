@@ -88,6 +88,14 @@ elif command -v ifconfig >/dev/null 2>&1; then
   p net_all_ipv4 "$(ifconfig 2>/dev/null | awk '/inet /{print $2}' | grep -v '^127\.' | tr '\n' ' ')"
   p net_interfaces "$(ifconfig -l 2>/dev/null)"
 fi
+# The whole ifconfig output, for the per-interface facts. Like the
+# environment below it is MULTI-LINE, so it is prefixed and placed
+# after every p-line: parseKV stops at the first IFC line. Only when
+# there is no "ip" — the parser below reads BSD ifconfig syntax, and
+# a Linux host takes the "ip" branch above.
+if ! command -v ip >/dev/null 2>&1 && command -v ifconfig >/dev/null 2>&1; then
+  ifconfig -a 2>/dev/null | sed 's/^/IFC /'
+fi
 # LAST, and every line prefixed: a value spanning lines cannot then
 # be read back as one of the facts above. parseKV stops here.
 env | sed 's/^/ENV /'
@@ -114,7 +122,8 @@ func Gather(ctx context.Context, conn remoteexec.Connection) (map[string]any, er
 	// Everything before the first ENV line. An environment variable
 	// whose value spans lines would otherwise have its continuation
 	// read as a fact — a host could name a fact by exporting one.
-	facts, _, _ := strings.Cut(res.Stdout, "\nENV ")
+	beforeEnv, _, _ := strings.Cut(res.Stdout, "\nENV ")
+	facts, ifconfigOut, _ := strings.Cut(beforeEnv, "\nIFC ")
 	raw := parseKV(facts)
 
 	out := map[string]any{
@@ -181,6 +190,13 @@ func Gather(ctx context.Context, conn remoteexec.Connection) (map[string]any, er
 	}
 	if d4 := defaultIPv4(raw); len(d4) > 0 {
 		out["default_ipv4"] = d4
+	}
+	// One fact per network interface, keyed by its own name, which is
+	// how a playbook reads ansible_facts.en0.ipv4[0].address. Present
+	// only where the probe could supply ifconfig output: see
+	// bsdInterfaces for why this is not attempted on Linux.
+	for name, iface := range bsdInterfaces(ifconfigOut) {
+		out[name] = iface
 	}
 	if raw["nproc"] != "" {
 		out["processor_vcpus"] = raw["nproc"]
