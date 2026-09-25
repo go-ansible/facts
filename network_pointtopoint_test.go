@@ -2,6 +2,7 @@ package facts
 
 import (
 	"os/exec"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -92,7 +93,7 @@ func TestDefaultIPv4OnAPointToPointInterface(t *testing.T) {
 		"gateway":    "10.215.8.136",
 		"macaddress": "unknown",
 		"type":       "unknown",
-		"mtu":        1400,
+		"mtu":        "1400",
 	}
 	for k, w := range want {
 		if got[k] != w {
@@ -120,5 +121,120 @@ func TestDefaultIPv4OnAnEthernetInterface(t *testing.T) {
 	}
 	if got["netmask"] != "255.255.255.0" {
 		t.Errorf("netmask = %#v, want 255.255.255.0", got["netmask"])
+	}
+}
+
+// Measured with `| type_debug` against ansible-core 2.21.4, which is
+// the only way this class of difference shows: real reports
+// default_ipv4.mtu as str where this port reported int, and BOTH
+// render "1400" in any message, so every value comparison agreed. The
+// difference is real -- `when: ansible_default_ipv4.mtu > 1400`
+// errors in real and silently succeeded here.
+//
+// The same probe found three keys real carries that this port did not:
+// broadcast, device and flags.
+func TestDefaultIPv4CarriesRealsFullShape(t *testing.T) {
+	got := defaultIPv4(map[string]string{
+		"net_cidr":       "10.215.8.136 0xffffffff",
+		"net_interface":  "utun4",
+		"net_gateway":    "10.215.8.136",
+		"net_macaddress": "",
+		"net_mtu":        "1400",
+		"net_flags":      "UP,POINTOPOINT,RUNNING,MULTICAST",
+		"net_broadcast":  "10.215.8.136",
+	})
+	// Captured from real on the same host at the same moment.
+	want := map[string]any{
+		"address":    "10.215.8.136",
+		"broadcast":  "10.215.8.136",
+		"device":     "utun4",
+		"flags":      []string{"UP", "POINTOPOINT", "RUNNING", "MULTICAST"},
+		"gateway":    "10.215.8.136",
+		"interface":  "utun4",
+		"macaddress": "unknown",
+		"mtu":        "1400",
+		"netmask":    "255.255.255.255",
+		"network":    "10.215.8.136",
+		"type":       "unknown",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("default_ipv4 =\n  %#v\nwant\n  %#v", got, want)
+	}
+}
+
+// With no hardware address, LOOPBACK in the flags makes the type
+// "loopback" rather than "unknown" -- real's rule, witnessed on lo0's
+// own fact dict.
+func TestDefaultIPv4TypeFromLoopbackFlag(t *testing.T) {
+	got := defaultIPv4(map[string]string{
+		"net_cidr":      "127.0.0.1 0xff000000",
+		"net_interface": "lo0",
+		"net_flags":     "UP,LOOPBACK,RUNNING,MULTICAST",
+	})
+	if got["type"] != "loopback" {
+		t.Errorf("type = %#v, want \"loopback\"", got["type"])
+	}
+	if got["macaddress"] != "unknown" {
+		t.Errorf("macaddress = %#v, want \"unknown\"", got["macaddress"])
+	}
+}
+
+// The broadcast of a point-to-point interface is its PEER: real reads
+// the "--> peer" field there, where an ordinary interface has a
+// "broadcast" keyword. Both come out of the same probe line.
+func TestProbeReadsBroadcastFromEitherForm(t *testing.T) {
+	if _, err := exec.LookPath("awk"); err != nil {
+		t.Skip("awk not available")
+	}
+	re := regexp.MustCompile(`p net_broadcast "\$\(ifconfig "\$ifc" 2>/dev/null \| awk '([^']*)'\)"`)
+	m := re.FindStringSubmatch(probeScript)
+	if m == nil {
+		t.Fatal("could not find the net_broadcast awk program in probeScript")
+	}
+	for _, tc := range []struct{ name, input, want string }{
+		{"point-to-point peer", utunIfconfig, "10.215.8.136"},
+		{"broadcast keyword", en0Ifconfig, "192.168.20.255"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command("awk", m[1])
+			cmd.Stdin = strings.NewReader(tc.input)
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("awk: %v", err)
+			}
+			if got := strings.TrimSpace(string(out)); got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The flags program, against the same two captures.
+func TestProbeReadsFlagsFromTheInterfaceLine(t *testing.T) {
+	if _, err := exec.LookPath("awk"); err != nil {
+		t.Skip("awk not available")
+	}
+	re := regexp.MustCompile(`p net_flags "\$\(ifconfig "\$ifc" 2>/dev/null \| awk '([^']*)'\)"`)
+	m := re.FindStringSubmatch(probeScript)
+	if m == nil {
+		t.Fatal("could not find the net_flags awk program in probeScript")
+	}
+	for _, tc := range []struct{ name, input, want string }{
+		{"point-to-point", utunIfconfig, "UP,POINTOPOINT,RUNNING,MULTICAST"},
+		// en0's SECOND line carries options=6460<TSO4,...>; taking the
+		// first match rather than the first LINE would read that.
+		{"ordinary", en0Ifconfig, "UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command("awk", m[1])
+			cmd.Stdin = strings.NewReader(tc.input)
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("awk: %v", err)
+			}
+			if got := strings.TrimSpace(string(out)); got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

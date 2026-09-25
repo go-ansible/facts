@@ -69,6 +69,8 @@ if command -v ip >/dev/null 2>&1; then
     p net_cidr "$(ip -4 -o addr show dev "$ifc" 2>/dev/null | awk '{print $4}' | head -1)"
     p net_macaddress "$(cat /sys/class/net/"$ifc"/address 2>/dev/null)"
     p net_mtu "$(cat /sys/class/net/"$ifc"/mtu 2>/dev/null)"
+    p net_flags "$(ip -o link show dev "$ifc" 2>/dev/null | awk '{if(match($0,/<[^>]*>/)) print substr($0,RSTART+1,RLENGTH-2)}')"
+    p net_broadcast "$(ip -4 -o addr show dev "$ifc" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="brd") print $(i+1)}' | head -1)"
   fi
   p net_all_ipv4 "$(ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -v '^127\.' | tr '\n' ' ')"
   p net_interfaces "$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | tr '\n' ' ')"
@@ -79,6 +81,8 @@ elif command -v ifconfig >/dev/null 2>&1; then
   if [ -n "$ifc" ]; then
     p net_cidr "$(ifconfig "$ifc" 2>/dev/null | awk '/inet /{a="";m="";for(i=1;i<=NF;i++){if($i=="inet")a=$(i+1);else if($i=="netmask")m=$(i+1)};if(a!=""){print a" "m;exit}}')"
     p net_macaddress "$(ifconfig "$ifc" 2>/dev/null | awk '/ether /{print $2; exit}')"
+    p net_flags "$(ifconfig "$ifc" 2>/dev/null | awk 'NR==1{if(match($0,/<[^>]*>/)) print substr($0,RSTART+1,RLENGTH-2)}')"
+    p net_broadcast "$(ifconfig "$ifc" 2>/dev/null | awk '/inet /{b="";for(i=1;i<=NF;i++){if($i=="broadcast")b=$(i+1);else if($i=="-->")b=$(i+1)};print b;exit}')"
     p net_mtu "$(ifconfig "$ifc" 2>/dev/null | sed -n 's/.*mtu \([0-9]*\).*/\1/p' | head -1)"
   fi
   p net_all_ipv4 "$(ifconfig 2>/dev/null | awk '/inet /{print $2}' | grep -v '^127\.' | tr '\n' ' ')"
@@ -286,9 +290,22 @@ func defaultIPv4(raw map[string]string) map[string]any {
 	// Both directions are measured -- the ethernet one against every
 	// run of the differential corpus, the other against a run made
 	// while the default route went through a utun interface.
+	flags := splitFlags(raw["net_flags"])
+
 	macaddress, ifaceType := raw["net_macaddress"], "ether"
 	if macaddress == "" {
-		macaddress, ifaceType = "unknown", "unknown"
+		macaddress = "unknown"
+		// Real decides the type from the interface's FLAGS when there
+		// is no hardware address to call it ethernet by: LOOPBACK
+		// makes it "loopback", anything else "unknown". Witnessed on
+		// both sides -- lo0's own fact dict reports "loopback", a VPN
+		// utun interface reports "unknown" -- though not through
+		// default_ipv4 itself, which a loopback default route would
+		// be needed to produce.
+		ifaceType = "unknown"
+		if hasFlag(flags, "LOOPBACK") {
+			ifaceType = "loopback"
+		}
 	}
 	out := map[string]any{
 		"address":    addr.String(),
@@ -296,17 +313,25 @@ func defaultIPv4(raw map[string]string) map[string]any {
 		"network":    addr.Mask(mask).String(),
 		"type":       ifaceType,
 		"macaddress": macaddress,
+		"flags":      flags,
 	}
 	for key, value := range map[string]string{
 		"interface": raw["net_interface"],
+		// device repeats interface. Real carries both, so a playbook
+		// written against either keeps working.
+		"device":    raw["net_interface"],
 		"gateway":   raw["net_gateway"],
+		"broadcast": raw["net_broadcast"],
+		// mtu is a STRING, not a number. Measured with type_debug:
+		// real reports str where this port reported int, which no
+		// comparison of VALUES could show -- both render "1400". The
+		// difference is real: `when: mtu > 1400` errors in real and
+		// silently succeeded here.
+		"mtu": raw["net_mtu"],
 	} {
 		if value != "" {
 			out[key] = value
 		}
-	}
-	if mtu, err := strconv.Atoi(raw["net_mtu"]); err == nil {
-		out["mtu"] = mtu
 	}
 	return out
 }
@@ -337,4 +362,30 @@ func parseIPv4(value string) (net.IP, net.IPMask, bool) {
 	}
 	mask := net.IPv4Mask(byte(bits>>24), byte(bits>>16), byte(bits>>8), byte(bits))
 	return addr, mask, true
+}
+
+// splitFlags turns the probe's comma-joined interface flags into the
+// list real reports, tolerating an absent or empty value: real always
+// carries the key, as a list, even when it parsed none.
+func splitFlags(raw string) []string {
+	if raw == "" {
+		return []string{}
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func hasFlag(flags []string, want string) bool {
+	for _, f := range flags {
+		if f == want {
+			return true
+		}
+	}
+	return false
 }

@@ -245,8 +245,13 @@ func TestDefaultIPv4OmitsWhatItCannotAnswer(t *testing.T) {
 	want := map[string]any{
 		"address": "192.168.1.152", "netmask": "255.255.255.0",
 		"network": "192.168.1.0", "type": "ether", "interface": "en0",
-		"gateway": "192.168.1.254", "macaddress": "6e:8f:60:25:76:16",
-		"mtu": 1500,
+		"device": "en0", "gateway": "192.168.1.254",
+		"macaddress": "6e:8f:60:25:76:16",
+		// A STRING, as real reports it — see the type_debug
+		// measurement in network_pointtopoint_test.go.
+		"mtu": "1500",
+		// Always present, even when the probe parsed none.
+		"flags": []string{},
 	}
 	if !reflect.DeepEqual(d4, want) {
 		t.Errorf("default_ipv4 =\n  %#v\nwant\n  %#v", d4, want)
