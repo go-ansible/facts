@@ -82,7 +82,7 @@ elif command -v ifconfig >/dev/null 2>&1; then
     p net_cidr "$(ifconfig "$ifc" 2>/dev/null | awk '/inet /{a="";m="";for(i=1;i<=NF;i++){if($i=="inet")a=$(i+1);else if($i=="netmask")m=$(i+1)};if(a!=""){print a" "m;exit}}')"
     p net_macaddress "$(ifconfig "$ifc" 2>/dev/null | awk '/ether /{print $2; exit}')"
     p net_flags "$(ifconfig "$ifc" 2>/dev/null | awk 'NR==1{if(match($0,/<[^>]*>/)) print substr($0,RSTART+1,RLENGTH-2)}')"
-    p net_broadcast "$(ifconfig "$ifc" 2>/dev/null | awk '/inet /{b="";for(i=1;i<=NF;i++){if($i=="broadcast")b=$(i+1);else if($i=="-->")b=$(i+1)};print b;exit}')"
+    p net_broadcast "$(ifconfig "$ifc" 2>/dev/null | awk '/inet /{b="";for(i=1;i<=NF;i++)if($i=="broadcast")b=$(i+1);print b;exit}')"
     p net_mtu "$(ifconfig "$ifc" 2>/dev/null | sed -n 's/.*mtu \([0-9]*\).*/\1/p' | head -1)"
   fi
   p net_all_ipv4 "$(ifconfig 2>/dev/null | awk '/inet /{print $2}' | grep -v '^127\.' | tr '\n' ' ')"
@@ -307,7 +307,27 @@ func defaultIPv4(raw map[string]string) map[string]any {
 			ifaceType = "loopback"
 		}
 	}
+	// The broadcast address is the one the interface DECLARES, and
+	// otherwise the one its address and netmask imply. Real never
+	// reads the "--> peer" field of a point-to-point interface for
+	// this (parse_inet_line in ansible/module_utils/facts/network/
+	// generic_bsd.py looks for the "broadcast" keyword and computes
+	// the value when it is absent) -- and reading the peer instead
+	// agreed with real on the only point-to-point interface available
+	// to measure, because a /32 makes the computed broadcast equal
+	// the address. On an ordinary /24 tunnel the two answers differ
+	// completely: peer 10.8.0.1 against broadcast 10.8.0.255.
+	broadcast := raw["net_broadcast"]
+	if broadcast == "" {
+		b := make(net.IP, len(addr))
+		for i := range addr {
+			b[i] = addr[i] | ^mask[i]
+		}
+		broadcast = b.String()
+	}
+
 	out := map[string]any{
+		"broadcast":  broadcast,
 		"address":    addr.String(),
 		"netmask":    net.IP(mask).String(),
 		"network":    addr.Mask(mask).String(),
@@ -319,9 +339,8 @@ func defaultIPv4(raw map[string]string) map[string]any {
 		"interface": raw["net_interface"],
 		// device repeats interface. Real carries both, so a playbook
 		// written against either keeps working.
-		"device":    raw["net_interface"],
-		"gateway":   raw["net_gateway"],
-		"broadcast": raw["net_broadcast"],
+		"device":  raw["net_interface"],
+		"gateway": raw["net_gateway"],
 		// mtu is a STRING, not a number. Measured with type_debug:
 		// real reports str where this port reported int, which no
 		// comparison of VALUES could show -- both render "1400". The
