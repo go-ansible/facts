@@ -207,3 +207,46 @@ func trimEnds(s string) string {
 	}
 	return s[1 : len(s)-1]
 }
+
+// defaultFromInterface builds default_ipv4 or default_ipv6 the way
+// real does (merge_default_interface in generic_bsd.py): start from
+// the route's own interface and gateway, copy EVERY key of that
+// interface's fact dict except its address lists, then merge in the
+// first address of the family asked for.
+//
+// This port used to assemble the dict from separate probe values
+// instead, and got away with it only because the default route
+// happened to run through a VPN tunnel -- an interface with no media,
+// no status and no nd6 options, so the four keys the hand-built
+// version could not produce were the four real did not report either.
+// The moment the route moved back to a physical interface, real
+// reported media, media_select, options and status and this port did
+// not.
+func defaultFromInterface(ifaces map[string]map[string]any, iface, gateway, family string) map[string]any {
+	if iface == "" {
+		return nil
+	}
+	info, ok := ifaces[iface]
+	if !ok {
+		return nil
+	}
+	out := map[string]any{"interface": iface}
+	if gateway != "" {
+		out["gateway"] = gateway
+	}
+	for k, v := range info {
+		if k == "ipv4" || k == "ipv6" {
+			continue
+		}
+		out[k] = v
+	}
+	// The FIRST address of that family, whatever it is: real picks by
+	// matching a route-supplied address only on the BSDs that report
+	// one, and falls back to the first everywhere else.
+	if addrs, ok := info[family].([]map[string]any); ok && len(addrs) > 0 {
+		for k, v := range addrs[0] {
+			out[k] = v
+		}
+	}
+	return out
+}

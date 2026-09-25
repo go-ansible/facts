@@ -166,3 +166,30 @@ func TestChrootAndFipsAreBooleans(t *testing.T) {
 		}
 	}
 }
+
+// Real reports these three even on a host that has none of the
+// hardware: two empty strings and an empty list, not absent keys.
+func TestStorageIdentitiesAreAlwaysReported(t *testing.T) {
+	out := assemble(map[string]string{}, "", nil)
+	if out["hostnqn"] != "" {
+		t.Errorf("hostnqn = %#v, want \"\"", out["hostnqn"])
+	}
+	if out["iscsi_iqn"] != "" {
+		t.Errorf("iscsi_iqn = %#v, want \"\"", out["iscsi_iqn"])
+	}
+	if got, ok := out["fibre_channel_wwn"].([]any); !ok || len(got) != 0 {
+		t.Errorf("fibre_channel_wwn = %#v, want an empty list", out["fibre_channel_wwn"])
+	}
+	// And carried through when the host does have them.
+	out = assemble(map[string]string{
+		"hostnqn":           "nqn.2014-08.org.nvmexpress:uuid:00000000-0000-0000-0000-000000000000",
+		"iscsi_iqn":         "iqn.1993-08.org.debian:01:0000000000",
+		"fibre_channel_wwn": "10000000c9000000 10000000c9000001 ",
+	}, "", nil)
+	if out["hostnqn"] == "" || out["iscsi_iqn"] == "" {
+		t.Errorf("hostnqn/iscsi_iqn dropped: %#v %#v", out["hostnqn"], out["iscsi_iqn"])
+	}
+	if !reflect.DeepEqual(out["fibre_channel_wwn"], []any{"10000000c9000000", "10000000c9000001"}) {
+		t.Errorf("fibre_channel_wwn = %#v", out["fibre_channel_wwn"])
+	}
+}

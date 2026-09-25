@@ -79,6 +79,8 @@ elif command -v ifconfig >/dev/null 2>&1; then
   ifc=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
   p net_interface "$ifc"
   p net_gateway "$(route -n get default 2>/dev/null | awk '/gateway:/{print $2}')"
+  p net_interface6 "$(route -n get -inet6 default 2>/dev/null | awk '/interface:/{print $2}')"
+  p net_gateway6 "$(route -n get -inet6 default 2>/dev/null | awk '/gateway:/{print $2}')"
   if [ -n "$ifc" ]; then
     p net_cidr "$(ifconfig "$ifc" 2>/dev/null | awk '/inet /{a="";m="";for(i=1;i<=NF;i++){if($i=="inet")a=$(i+1);else if($i=="netmask")m=$(i+1)};if(a!=""){print a" "m;exit}}')"
     p net_macaddress "$(ifconfig "$ifc" 2>/dev/null | awk '/ether /{print $2; exit}')"
@@ -112,6 +114,12 @@ else
   fi
 fi
 p fips "$(cat /proc/sys/crypto/fips_enabled 2>/dev/null || echo 0)"
+# Storage identities, from the files real reads. Absent on a host that
+# has none, which is every macOS host -- real still reports the facts,
+# as an empty string and an empty list.
+p hostnqn "$(cat /etc/nvme/hostnqn 2>/dev/null | head -1)"
+p iscsi_iqn "$(awk -F= '/^InitiatorName=/{print $2; exit}' /etc/iscsi/initiatorname.iscsi 2>/dev/null)"
+p fibre_channel_wwn "$(cat /sys/class/fc_host/*/port_name 2>/dev/null | sed 's/^0x//' | tr '\n' ' ')"
 p userspace_bits "$(getconf LONG_BIT 2>/dev/null)"
 # --- sysctl, i.e. macOS and the BSDs -----------------------------------
 # Linux reports these too, from DMI and /proc/cpuinfo, and not always
@@ -249,6 +257,11 @@ func assemble(raw map[string]string, ifconfigOut string, env map[string]any) map
 	if list := splitFields(raw["net_interfaces"]); len(list) > 0 {
 		out["interfaces"] = list
 	}
+	// A narrower dict built from separate probe values, kept for a host
+	// whose interfaces were not parsed at all -- Linux, where the probe
+	// collects no ifconfig output. Where they WERE parsed,
+	// defaultFromInterface below replaces this with real's own
+	// construction, which carries every key of the interface.
 	if d4 := defaultIPv4(raw); len(d4) > 0 {
 		out["default_ipv4"] = d4
 	}
@@ -256,6 +269,17 @@ func assemble(raw map[string]string, ifconfigOut string, env map[string]any) map
 	// necessarily speaks in.
 	out["is_chroot"] = raw["is_chroot"] == "true"
 	out["fips"] = raw["fips"] == "1"
+
+	// Reported even when empty: real reports both as an empty string
+	// and the WWN list as an empty list on a host with no such
+	// hardware, rather than leaving the keys out.
+	out["hostnqn"] = raw["hostnqn"]
+	out["iscsi_iqn"] = raw["iscsi_iqn"]
+	wwn := splitFields(raw["fibre_channel_wwn"])
+	if wwn == nil {
+		wwn = []any{}
+	}
+	out["fibre_channel_wwn"] = wwn
 
 	if b := raw["userspace_bits"]; b != "" {
 		out["userspace_bits"] = b
@@ -303,11 +327,25 @@ func assemble(raw map[string]string, ifconfigOut string, env map[string]any) map
 		}
 	}
 
+	ifaces := bsdInterfaces(ifconfigOut)
+	// Preferred over the probe-value version below whenever the
+	// interface was actually parsed, because this is real's own
+	// construction rather than a reimplementation of part of it.
+	if d4 := defaultFromInterface(ifaces, raw["net_interface"], raw["net_gateway"], "ipv4"); d4 != nil {
+		out["default_ipv4"] = d4
+	}
+	// default_ipv6 exists only on that path: a host with no parsed
+	// interfaces has nothing to merge, and real's Linux collector
+	// builds this from sources this port does not read.
+	if d6 := defaultFromInterface(ifaces, raw["net_interface6"], raw["net_gateway6"], "ipv6"); d6 != nil {
+		out["default_ipv6"] = d6
+	}
+
 	// One fact per network interface, keyed by its own name, which is
 	// how a playbook reads ansible_facts.en0.ipv4[0].address. Present
 	// only where the probe could supply ifconfig output: see
 	// bsdInterfaces for why this is not attempted on Linux.
-	for name, iface := range bsdInterfaces(ifconfigOut) {
+	for name, iface := range ifaces {
 		out[name] = iface
 	}
 	if raw["nproc"] != "" {
