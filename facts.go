@@ -77,7 +77,7 @@ elif command -v ifconfig >/dev/null 2>&1; then
   p net_interface "$ifc"
   p net_gateway "$(route -n get default 2>/dev/null | awk '/gateway:/{print $2}')"
   if [ -n "$ifc" ]; then
-    p net_cidr "$(ifconfig "$ifc" 2>/dev/null | awk '/inet /{print $2" "$4; exit}')"
+    p net_cidr "$(ifconfig "$ifc" 2>/dev/null | awk '/inet /{a="";m="";for(i=1;i<=NF;i++){if($i=="inet")a=$(i+1);else if($i=="netmask")m=$(i+1)};if(a!=""){print a" "m;exit}}')"
     p net_macaddress "$(ifconfig "$ifc" 2>/dev/null | awk '/ether /{print $2; exit}')"
     p net_mtu "$(ifconfig "$ifc" 2>/dev/null | sed -n 's/.*mtu \([0-9]*\).*/\1/p' | head -1)"
   fi
@@ -279,16 +279,27 @@ func defaultIPv4(raw map[string]string) map[string]any {
 	if !ok {
 		return nil
 	}
+	// An interface with no hardware address is not an ethernet one,
+	// and real says so rather than leaving the keys out: a VPN's
+	// point-to-point interface reports macaddress "unknown" and type
+	// "unknown", where an ordinary NIC reports its MAC and "ether".
+	// Both directions are measured -- the ethernet one against every
+	// run of the differential corpus, the other against a run made
+	// while the default route went through a utun interface.
+	macaddress, ifaceType := raw["net_macaddress"], "ether"
+	if macaddress == "" {
+		macaddress, ifaceType = "unknown", "unknown"
+	}
 	out := map[string]any{
-		"address": addr.String(),
-		"netmask": net.IP(mask).String(),
-		"network": addr.Mask(mask).String(),
-		"type":    "ether",
+		"address":    addr.String(),
+		"netmask":    net.IP(mask).String(),
+		"network":    addr.Mask(mask).String(),
+		"type":       ifaceType,
+		"macaddress": macaddress,
 	}
 	for key, value := range map[string]string{
-		"interface":  raw["net_interface"],
-		"gateway":    raw["net_gateway"],
-		"macaddress": raw["net_macaddress"],
+		"interface": raw["net_interface"],
+		"gateway":   raw["net_gateway"],
 	} {
 		if value != "" {
 			out[key] = value
