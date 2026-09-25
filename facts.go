@@ -90,6 +90,40 @@ elif command -v ifconfig >/dev/null 2>&1; then
   p net_all_ipv6 "$(ifconfig 2>/dev/null | awk '/inet6 /{print $2}' | grep -vx -e '::1' -e 'fe80::1%lo0' | tr '\n' ' ')"
   p net_interfaces "$(ifconfig -l 2>/dev/null)"
 fi
+# --- portable odds and ends ------------------------------------------
+# is_chroot, by real's own algorithm (facts/system/chroot.py): the
+# debian_chroot variable wins; otherwise compare / with /proc/1/root,
+# which only Linux has; otherwise fall back to "is / inode 2?", with
+# the two filesystems real knows use a different root inode.
+if [ -n "${debian_chroot:-}" ]; then
+  p is_chroot true
+else
+  root_id=$(stat -c '%i %d' / 2>/dev/null || ls -di / 2>/dev/null | awk '{print $1}')
+  proc_id=$(stat -c '%i %d' /proc/1/root/. 2>/dev/null)
+  if [ -n "$proc_id" ]; then
+    if [ "$root_id" = "$proc_id" ]; then p is_chroot false; else p is_chroot true; fi
+  else
+    expected=2
+    case "$(stat -f --format=%T / 2>/dev/null)" in
+      *btrfs*) expected=256 ;;
+      *xfs*)   expected=128 ;;
+    esac
+    if [ "$(echo "$root_id" | awk '{print $1}')" = "$expected" ]; then p is_chroot false; else p is_chroot true; fi
+  fi
+fi
+p fips "$(cat /proc/sys/crypto/fips_enabled 2>/dev/null || echo 0)"
+p userspace_bits "$(getconf LONG_BIT 2>/dev/null)"
+# --- sysctl, i.e. macOS and the BSDs -----------------------------------
+# Linux reports these too, from DMI and /proc/cpuinfo, and not always
+# in the same SHAPE: ansible_processor is a string here and a LIST
+# there. Guessing at the other platform's shape is worse than leaving
+# it alone, so these are emitted only where sysctl answers.
+if command -v sysctl >/dev/null 2>&1; then
+  p hw_model "$(sysctl -n hw.model 2>/dev/null)"
+  p kern_osversion "$(sysctl -n kern.osversion 2>/dev/null)"
+  p kern_osrevision "$(sysctl -n kern.osrevision 2>/dev/null)"
+  p cpu_brand "$(sysctl -n machdep.cpu.brand_string 2>/dev/null)"
+fi
 # --- resolver, host keys, and the odds and ends -----------------------
 p dns_search "$(awk '/^search /{for(i=2;i<=NF;i++) printf "%s ", $i}' /etc/resolv.conf 2>/dev/null)"
 p dns_nameservers "$(awk '/^nameserver /{printf "%s ", $2}' /etc/resolv.conf 2>/dev/null)"
@@ -218,6 +252,29 @@ func assemble(raw map[string]string, ifconfigOut string, env map[string]any) map
 	if d4 := defaultIPv4(raw); len(d4) > 0 {
 		out["default_ipv4"] = d4
 	}
+	// Booleans real reports as booleans, not as the strings the probe
+	// necessarily speaks in.
+	out["is_chroot"] = raw["is_chroot"] == "true"
+	out["fips"] = raw["fips"] == "1"
+
+	if b := raw["userspace_bits"]; b != "" {
+		out["userspace_bits"] = b
+	}
+	// hw.model answers TWO facts in real, under both names.
+	if m := raw["hw_model"]; m != "" {
+		out["model"] = m
+		out["product_name"] = m
+	}
+	for fact, key := range map[string]string{
+		"osversion":  "kern_osversion",
+		"osrevision": "kern_osrevision",
+		"processor":  "cpu_brand",
+	} {
+		if v := raw[key]; v != "" {
+			out[fact] = v
+		}
+	}
+
 	// module_setup marks that the setup module ran at all. Real sets
 	// it unconditionally when it gathers, and a playbook tests it to
 	// tell "facts gathered" from "gather_facts: false".

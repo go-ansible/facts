@@ -110,3 +110,59 @@ func TestGecosAndIPv6List(t *testing.T) {
 		t.Error("all_ipv6_addresses present with none reported")
 	}
 }
+
+// hw.model answers TWO facts in real, under both names. Measured on a
+// Mac16,5; the value here is real's own shape with a different model.
+func TestSysctlDerivedFacts(t *testing.T) {
+	out := assemble(map[string]string{
+		"hw_model":        "MacExample1,1",
+		"kern_osversion":  "25G83",
+		"kern_osrevision": "199506",
+		"cpu_brand":       "Apple M4 Max",
+		"userspace_bits":  "64",
+	}, "", nil)
+	for k, want := range map[string]any{
+		"model":          "MacExample1,1",
+		"product_name":   "MacExample1,1",
+		"osversion":      "25G83",
+		"osrevision":     "199506",
+		"processor":      "Apple M4 Max",
+		"userspace_bits": "64",
+	} {
+		if out[k] != want {
+			t.Errorf("%s = %#v, want %#v", k, out[k], want)
+		}
+	}
+	// A host whose sysctl answered none of them reports none of them,
+	// rather than empty strings. Linux is such a host: it has these
+	// facts in real, from other sources and -- for processor -- in a
+	// different SHAPE, a list rather than a string.
+	bare := assemble(map[string]string{}, "", nil)
+	for _, k := range []string{"model", "product_name", "osversion", "osrevision", "processor", "userspace_bits"} {
+		if _, ok := bare[k]; ok {
+			t.Errorf("%s present although sysctl answered nothing", k)
+		}
+	}
+}
+
+// Real reports these two as booleans. The probe can only speak in
+// strings, so the conversion is the thing under test -- and a missing
+// value must read as false, not as absent: real always reports both.
+func TestChrootAndFipsAreBooleans(t *testing.T) {
+	for _, tc := range []struct {
+		raw          map[string]string
+		chroot, fips bool
+	}{
+		{map[string]string{"is_chroot": "true", "fips": "1"}, true, true},
+		{map[string]string{"is_chroot": "false", "fips": "0"}, false, false},
+		{map[string]string{}, false, false},
+	} {
+		out := assemble(tc.raw, "", nil)
+		if out["is_chroot"] != tc.chroot {
+			t.Errorf("is_chroot for %v = %#v, want %v", tc.raw, out["is_chroot"], tc.chroot)
+		}
+		if out["fips"] != tc.fips {
+			t.Errorf("fips for %v = %#v, want %v", tc.raw, out["fips"], tc.fips)
+		}
+	}
+}
