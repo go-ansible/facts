@@ -159,6 +159,17 @@ done
 if ! command -v ip >/dev/null 2>&1 && command -v ifconfig >/dev/null 2>&1; then
   ifconfig -a 2>/dev/null | sed 's/^/IFC /'
 fi
+# The local facts directory (real's facts.d). Each *.fact file becomes
+# one entry: executed if it is executable, read otherwise. Multi-line
+# like the two sections above, so it is prefixed and kept out of the
+# key=value region.
+for f in __FACTPATH__/*.fact; do
+  [ -r "$f" ] || continue
+  b=${f##*/}; b=${b%.fact}
+  printf 'FACTD %s\n' "$b"
+  if [ -x "$f" ]; then "$f" 2>/dev/null; else cat "$f" 2>/dev/null; fi | sed 's/^/FACTC /'
+  printf 'FACTZ\n'
+done
 # LAST, and every line prefixed: a value spanning lines cannot then
 # be read back as one of the facts above. parseKV stops here.
 env | sed 's/^/ENV /'
@@ -173,8 +184,30 @@ env | sed 's/^/ENV /'
 // The returned map's keys are bare (e.g. "system", not
 // "ansible_system") — see vars.InjectFacts for the ansible_facts /
 // ansible_<name> namespacing a caller applies on top.
+// Options are the setup module's own knobs, as far as this port
+// implements them.
+type Options struct {
+	// FactPath is real's fact_path: the directory of *.fact files
+	// exposed as ansible_local. Empty means real's own default.
+	FactPath string
+}
+
+// defaultFactPath is where real looks when fact_path is not given.
+const defaultFactPath = "/etc/ansible/facts.d"
+
+// Gather collects facts with real's defaults.
 func Gather(ctx context.Context, conn remoteexec.Connection) (map[string]any, error) {
-	res, err := conn.Exec(ctx, probeScript, nil)
+	return GatherWith(ctx, conn, Options{})
+}
+
+// GatherWith collects facts, honouring the setup module's arguments.
+func GatherWith(ctx context.Context, conn remoteexec.Connection, opts Options) (map[string]any, error) {
+	factPath := opts.FactPath
+	if factPath == "" {
+		factPath = defaultFactPath
+	}
+	script := strings.ReplaceAll(probeScript, "__FACTPATH__", shellQuoteSingle(factPath))
+	res, err := conn.Exec(ctx, script, nil)
 	if err != nil {
 		return nil, fmt.Errorf("facts: gathering: %w", err)
 	}
@@ -186,8 +219,13 @@ func Gather(ctx context.Context, conn remoteexec.Connection) (map[string]any, er
 	// whose value spans lines would otherwise have its continuation
 	// read as a fact — a host could name a fact by exporting one.
 	beforeEnv, _, _ := strings.Cut(res.Stdout, "\nENV ")
-	facts, ifconfigOut, _ := strings.Cut(beforeEnv, "\nIFC ")
-	return assemble(parseKV(facts), ifconfigOut, parseEnv(res.Stdout)), nil
+	// The sections come out in this order: key=value, ifconfig, then
+	// the local facts. Cutting from the BACK keeps each one whole.
+	beforeLocal, localOut, _ := strings.Cut(beforeEnv, "\nFACTD ")
+	facts, ifconfigOut, _ := strings.Cut(beforeLocal, "\nIFC ")
+	out := assemble(parseKV(facts), ifconfigOut, parseEnv(res.Stdout))
+	out["ansible_local"] = parseLocalFacts(localOut)
+	return out, nil
 }
 
 // assemble turns what the probe reported into the fact map. It is
