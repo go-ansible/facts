@@ -132,6 +132,50 @@ if command -v sysctl >/dev/null 2>&1; then
   p kern_osrevision "$(sysctl -n kern.osrevision 2>/dev/null)"
   p cpu_brand "$(sysctl -n machdep.cpu.brand_string 2>/dev/null)"
 fi
+# --- the Python interpreter this host has ------------------------------
+# Real describes the interpreter that RAN the module. This port runs no
+# Python at all, so it reports the interpreter real's own discovery
+# would have chosen on this host -- the list below is
+# INTERPRETER_PYTHON_FALLBACK from ansible's config/base.yml, in order,
+# and the first one that answers wins.
+#
+# One value therefore differs from real by construction: sys.executable
+# is real's OWN interpreter, which on a host running ansible from a venv
+# is that venv's python and not the host's. Ours names the host's. A
+# playbook reading ansible_python_version -- which is what they read --
+# gets the same answer either way.
+#
+# python_version is asked for directly rather than rebuilt from
+# version_info: real uses platform.python_version(), which is parsed
+# from sys.version and is not always the three numbers joined by dots.
+#
+# The fields are space-separated and sys.executable comes LAST, because
+# it is the only one that can contain a space.
+py_out=
+for py_cand in python3.14 python3.13 python3.12 python3.11 python3.10 python3.9 /usr/bin/python3 python3; do
+  command -v "$py_cand" >/dev/null 2>&1 || continue
+  py_out=$("$py_cand" -c 'import platform, sys
+try:
+    from ssl import create_default_context, SSLContext
+    del create_default_context, SSLContext
+    has_ssl = "True"
+except ImportError:
+    has_ssl = "False"
+try:
+    impl = sys.subversion[0]
+except AttributeError:
+    try:
+        impl = sys.implementation.name
+    except AttributeError:
+        impl = ""
+print("%d %d %d %s %d %s %s %s %s" % (
+    sys.version_info[0], sys.version_info[1], sys.version_info[2],
+    sys.version_info[3], sys.version_info[4],
+    has_ssl, impl, platform.python_version(), sys.executable))
+' 2>/dev/null) && [ -n "$py_out" ] && break
+  py_out=
+done
+p python_probe "$py_out"
 # --- the four collectors whose answer is a probe, not a constant -------
 # Real runs each of these on EVERY platform and always reports the fact,
 # so a Darwin host gets "disabled"/{}/"N/A" rather than nothing. Only
@@ -378,6 +422,10 @@ func assemble(raw map[string]string, ifconfigOut string, env map[string]any) map
 	// of these on every host, so they are set unconditionally -- see
 	// systemcollectors.go for what each one is a port of.
 	out["apparmor"] = apparmorFacts(raw)
+	if py, pyver, ok := pythonFacts(raw); ok {
+		out["python"] = py
+		out["python_version"] = pyver
+	}
 	out["lsb"] = lsbFacts(raw)
 	out["selinux"], out["selinux_python_present"] = selinuxFacts()
 	out["system_capabilities"], out["system_capabilities_enforced"] = capsFacts(raw)

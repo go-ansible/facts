@@ -135,3 +135,19 @@ func TestProbeReportsSecurityFactsOnThisMachine(t *testing.T) {
 		t.Error("lsb_release is installed but the probe reported no label; the awk found nothing")
 	}
 }
+
+// runProbeHere runs the probe on the machine executing the tests and
+// returns its key=value section, so a test can assert against what this
+// host really answers rather than against a captured string.
+func runProbeHere(t *testing.T) map[string]string {
+	t.Helper()
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	out, err := exec.Command(sh, "-c", probeScript).Output()
+	if err != nil {
+		t.Fatalf("running the probe: %v", err)
+	}
+	return parseProbe(t, string(out))
+}
