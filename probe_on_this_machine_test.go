@@ -80,3 +80,58 @@ func parseProbe(t *testing.T, out string) map[string]string {
 	}
 	return got
 }
+
+// The security collectors' probe halves, on whatever machine is running
+// the tests. Like the network test above this asserts SHAPE, because a
+// CI runner's capabilities are its own — but CI runs ubuntu-latest as
+// well as macos-latest, so the lsb and capsh branches that no Mac can
+// reach are still exercised somewhere. The failure it is built to catch
+// is the one an awk program fails with: producing nothing at all.
+func TestProbeReportsSecurityFactsOnThisMachine(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	out, err := exec.Command(sh, "-c", probeScript).Output()
+	if err != nil {
+		t.Fatalf("running the probe: %v", err)
+	}
+	got := parseProbe(t, string(out))
+
+	switch got["apparmor_status"] {
+	case "enabled", "disabled":
+	default:
+		t.Errorf("apparmor_status = %q, want enabled or disabled", got["apparmor_status"])
+	}
+
+	if !regexp.MustCompile(`^-?\d+$`).MatchString(got["caps_rc"]) {
+		t.Errorf("caps_rc = %q, want an exit status", got["caps_rc"])
+	}
+	// capsh ran and said something: then the Current: line must have
+	// been found, or the awk that looks for it is broken.
+	if got["caps_rc"] == "0" && got["caps_current"] == "" {
+		t.Error("capsh exited 0 but the probe reported no Current: line")
+	}
+
+	lsbKeys := []string{"lsb_id", "lsb_release", "lsb_description", "lsb_codename"}
+	anySeen := false
+	for _, k := range lsbKeys {
+		v, ok := got[k]
+		if !ok {
+			t.Errorf("%s was not reported at all", k)
+			continue
+		}
+		if v == "" || (v[0] != '0' && v[0] != '1') {
+			t.Errorf("%s = %q, want a 0/1 seen-flag followed by the value", k, v)
+		}
+		if strings.HasPrefix(v, "1") {
+			anySeen = true
+		}
+	}
+	// On a machine that HAS lsb_release, at least one label must have
+	// come through. This is the assertion a silently-empty awk fails,
+	// and it can only fire on Linux.
+	if _, err := exec.LookPath("lsb_release"); err == nil && !anySeen {
+		t.Error("lsb_release is installed but the probe reported no label; the awk found nothing")
+	}
+}

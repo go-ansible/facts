@@ -132,6 +132,73 @@ if command -v sysctl >/dev/null 2>&1; then
   p kern_osrevision "$(sysctl -n kern.osrevision 2>/dev/null)"
   p cpu_brand "$(sysctl -n machdep.cpu.brand_string 2>/dev/null)"
 fi
+# --- the four collectors whose answer is a probe, not a constant -------
+# Real runs each of these on EVERY platform and always reports the fact,
+# so a Darwin host gets "disabled"/{}/"N/A" rather than nothing. Only
+# the selection is done here; the parsing real does in Python is done
+# in Go, where it can be tested against measured output.
+#
+# apparmor: real tests one path with os.path.exists and nothing else.
+p apparmor_status "$([ -e /sys/kernel/security/apparmor ] && echo enabled || echo disabled)"
+# lsb: the lsb_release script first, /etc/lsb-release only if that
+# produced nothing at all. Each value is prefixed with 1 or 0 for
+# whether the label was SEEN, because real distinguishes a label that
+# printed an empty value (the key exists, empty) from one that never
+# appeared (no key) -- and an empty p-line cannot say which.
+lsb_out=
+if lsb_path=$(command -v lsb_release 2>/dev/null); then
+  # rc != 0 means real returns {} and never reads the file.
+  lsb_out=$("$lsb_path" -a 2>/dev/null) || lsb_out=
+fi
+lsb_parsed=
+if [ -n "$lsb_out" ]; then
+  lsb_parsed=$(printf '%s\n' "$lsb_out" | awk '
+    {
+      if (index($0, ":") == 0) next
+      v = substr($0, index($0, ":") + 1)
+      gsub(/^[ \t]+|[ \t]+$/, "", v)
+      if (index($0, "LSB Version:"))         { rel = v; srel = 1 }
+      else if (index($0, "Distributor ID:")) { id = v; sid = 1 }
+      else if (index($0, "Description:"))    { desc = v; sdesc = 1 }
+      else if (index($0, "Release:"))        { rel = v; srel = 1 }
+      else if (index($0, "Codename:"))       { code = v; scode = 1 }
+    }
+    END { printf "%d%s\n%d%s\n%d%s\n%d%s\n", sid+0, id, srel+0, rel, sdesc+0, desc, scode+0, code }')
+fi
+if { [ -z "$lsb_parsed" ] || [ "$lsb_parsed" = "0
+0
+0
+0" ]; } && [ -r /etc/lsb-release ]; then
+  lsb_parsed=$(awk -F= '
+    index($0, "=") == 0 { next }
+    {
+      v = substr($0, index($0, "=") + 1)
+      gsub(/^[ \t]+|[ \t]+$/, "", v)
+      if (index($0, "DISTRIB_ID"))               { id = v; sid = 1 }
+      else if (index($0, "DISTRIB_RELEASE"))     { rel = v; srel = 1 }
+      else if (index($0, "DISTRIB_DESCRIPTION")) { desc = v; sdesc = 1 }
+      else if (index($0, "DISTRIB_CODENAME"))    { code = v; scode = 1 }
+    }
+    END { printf "%d%s\n%d%s\n%d%s\n%d%s\n", sid+0, id, srel+0, rel, sdesc+0, desc, scode+0, code }' \
+    /etc/lsb-release 2>/dev/null)
+fi
+# A missing /etc/lsb-release makes awk exit before END, so nothing at
+# all comes back -- and "nothing" cannot be told from a label that was
+# seen holding an empty value. Every p-line below must carry a flag.
+if [ -z "$lsb_parsed" ]; then lsb_parsed=$(printf '0\n0\n0\n0\n'); fi
+p lsb_id "$(printf '%s\n' "$lsb_parsed" | sed -n 1p)"
+p lsb_release "$(printf '%s\n' "$lsb_parsed" | sed -n 2p)"
+p lsb_description "$(printf '%s\n' "$lsb_parsed" | sed -n 3p)"
+p lsb_codename "$(printf '%s\n' "$lsb_parsed" | sed -n 4p)"
+# caps: real reports N/A unless capsh ran and exited 0, so the exit
+# status is a fact of its own here. It reads the LAST "Current:" line.
+caps_rc=-1
+caps_out=
+if capsh_path=$(command -v capsh 2>/dev/null); then
+  caps_out=$("$capsh_path" --print 2>/dev/null); caps_rc=$?
+fi
+p caps_rc "$caps_rc"
+p caps_current "$(printf '%s\n' "$caps_out" | awk '/^Current:/{l=$0} END{print l}')"
 # --- resolver, host keys, and the odds and ends -----------------------
 p dns_search "$(awk '/^search /{for(i=2;i<=NF;i++) printf "%s ", $i}' /etc/resolv.conf 2>/dev/null)"
 p dns_nameservers "$(awk '/^nameserver /{printf "%s ", $2}' /etc/resolv.conf 2>/dev/null)"
@@ -306,6 +373,17 @@ func assemble(raw map[string]string, ifconfigOut string, env map[string]any) map
 	// Booleans real reports as booleans, not as the strings the probe
 	// necessarily speaks in.
 	out["is_chroot"] = raw["is_chroot"] == "true"
+
+	// The security and virtualisation collectors. Real reports every one
+	// of these on every host, so they are set unconditionally -- see
+	// systemcollectors.go for what each one is a port of.
+	out["apparmor"] = apparmorFacts(raw)
+	out["lsb"] = lsbFacts(raw)
+	out["selinux"], out["selinux_python_present"] = selinuxFacts()
+	out["system_capabilities"], out["system_capabilities_enforced"] = capsFacts(raw)
+	for k, v := range virtualFacts() {
+		out[k] = v
+	}
 	out["fips"] = raw["fips"] == "1"
 
 	// Reported even when empty: real reports both as an empty string
