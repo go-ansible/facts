@@ -166,7 +166,7 @@ fi
 for f in __FACTPATH__/*.fact; do
   [ -r "$f" ] || continue
   b=${f##*/}; b=${b%.fact}
-  printf 'FACTD %s\n' "$b"
+  printf 'FACTD %s %s\n' "$b" "$f"
   if [ -x "$f" ]; then "$f" 2>/dev/null; else cat "$f" 2>/dev/null; fi | sed 's/^/FACTC /'
   printf 'FACTZ\n'
 done

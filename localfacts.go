@@ -33,24 +33,30 @@ func parseLocalFacts(section string) map[string]any {
 		return out
 	}
 	// The first name lost its "FACTD " marker to the caller's Cut.
-	var name string
+	var name, path string
 	var body []string
+	setHeader := func(h string) {
+		// "<name> <path>": real's error text names the FILE, so the
+		// probe sends both rather than leaving this side to guess a
+		// path from a key.
+		name, path, _ = strings.Cut(strings.TrimSpace(h), " ")
+	}
 	flush := func() {
 		if name == "" {
 			return
 		}
-		out[name] = parseFactContent(name, strings.Join(body, "\n"))
-		name, body = "", nil
+		out[name] = parseFactContent(path, strings.Join(body, "\n"))
+		name, path, body = "", "", nil
 	}
 	first := true
 	for _, line := range strings.Split(section, "\n") {
 		switch {
 		case first:
-			name = strings.TrimSpace(line)
+			setHeader(line)
 			first = false
 		case strings.HasPrefix(line, "FACTD "):
 			flush()
-			name = strings.TrimSpace(strings.TrimPrefix(line, "FACTD "))
+			setHeader(strings.TrimPrefix(line, "FACTD "))
 		case line == "FACTZ":
 			flush()
 		case strings.HasPrefix(line, "FACTC "):
@@ -62,7 +68,7 @@ func parseLocalFacts(section string) map[string]any {
 }
 
 // parseFactContent is JSON, then INI, then the error text.
-func parseFactContent(name, content string) any {
+func parseFactContent(path, content string) any {
 	var v any
 	if err := json.Unmarshal([]byte(content), &v); err == nil {
 		return v
@@ -70,11 +76,9 @@ func parseFactContent(name, content string) any {
 	if sections, ok := parseFactINI(content); ok {
 		return sections
 	}
-	// Real puts the explanation where the fact would have been. The
-	// path it names is the file's, which this side does not carry, so
-	// the name is used -- the sentence is real's, the subject is what
-	// is available.
-	return fmt.Sprintf("error loading facts as JSON or ini - please check content: %s.fact", name)
+	// Real puts the explanation where the fact would have been, naming
+	// the file it could not read.
+	return fmt.Sprintf("error loading facts as JSON or ini - please check content: %s", path)
 }
 
 // parseFactINI reads the [section] key = value form, reporting whether
