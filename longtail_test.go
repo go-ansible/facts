@@ -193,3 +193,39 @@ func TestStorageIdentitiesAreAlwaysReported(t *testing.T) {
 		t.Errorf("fibre_channel_wwn = %#v", out["fibre_channel_wwn"])
 	}
 }
+
+// default_ipv4 and default_ipv6 are ALWAYS reported, empty when there is
+// no default route this port can describe.
+//
+// Measured: on 2026-09-26 this machine had a describable IPv6 default
+// and real and this port both reported one. Two days later its only
+// IPv6 defaults were link-local through VPN tunnels, which
+// `route -n get -inet6 default` refuses to resolve, and real reported
+// default_ipv6 = {} while this port reported nothing at all. So the
+// key's PRESENCE is unconditional; only its contents vary.
+func TestDefaultRoutesAreAlwaysReported(t *testing.T) {
+	// A probe that found no default route at all, on either family.
+	out := assemble(map[string]string{}, "", nil)
+	for _, k := range []string{"default_ipv4", "default_ipv6"} {
+		v, present := out[k]
+		if !present {
+			t.Errorf("%s is absent; real reports an empty dict", k)
+			continue
+		}
+		m, ok := v.(map[string]any)
+		if !ok {
+			t.Errorf("%s is %T, want a map", k, v)
+			continue
+		}
+		// A NIL map is not an empty one: assigning nil still creates
+		// the key, so a test that only checked presence and length
+		// could not tell the two apart -- and a neuter returning nil
+		// passed.
+		if m == nil {
+			t.Errorf("%s is a nil map; real reports an empty dict", k)
+		}
+		if len(m) != 0 {
+			t.Errorf("%s = %v, want empty", k, m)
+		}
+	}
+}

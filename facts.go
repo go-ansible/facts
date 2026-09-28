@@ -495,15 +495,25 @@ func assemble(raw map[string]string, ifconfigOut string, env map[string]any) map
 	// Preferred over the probe-value version below whenever the
 	// interface was actually parsed, because this is real's own
 	// construction rather than a reimplementation of part of it.
-	if d4 := defaultFromInterface(ifaces, raw["net_interface"], raw["net_gateway"], "ipv4"); d4 != nil {
-		out["default_ipv4"] = d4
-	}
-	// default_ipv6 exists only on that path: a host with no parsed
-	// interfaces has nothing to merge, and real's Linux collector
-	// builds this from sources this port does not read.
-	if d6 := defaultFromInterface(ifaces, raw["net_interface6"], raw["net_gateway6"], "ipv6"); d6 != nil {
-		out["default_ipv6"] = d6
-	}
+	out["default_ipv4"] = emptyIfNil(defaultFromInterface(ifaces, raw["net_interface"], raw["net_gateway"], "ipv4"))
+	// default_ipv6 is ALWAYS reported, as an empty dict when there is no
+	// default route this port can describe. Real does the same: on
+	// 2026-09-26 this machine had a describable IPv6 default and both
+	// sides reported one; two days later its only IPv6 defaults were
+	// link-local through VPN tunnels, which `route -n get -inet6
+	// default` refuses to resolve ("not in table"), and real reported
+	// default_ipv6 = {} while this port reported NOTHING.
+	//
+	// So the key's presence is not conditional, only its contents. A
+	// playbook reading ansible_default_ipv6.address gets an empty dict
+	// to ask rather than an undefined variable.
+	//
+	// default_ipv4 gets the same treatment. That half is INFERRED rather
+	// than measured -- this machine has always had an IPv4 default, so
+	// the empty case has never been observed here -- but real builds
+	// both from one collector, and a key that appears only sometimes is
+	// the defect being fixed.
+	out["default_ipv6"] = emptyIfNil(defaultFromInterface(ifaces, raw["net_interface6"], raw["net_gateway6"], "ipv6"))
 
 	// One fact per network interface, keyed by its own name, which is
 	// how a playbook reads ansible_facts.en0.ipv4[0].address. Present
@@ -782,4 +792,13 @@ func resolverFacts(raw map[string]string) map[string]any {
 		out["nameservers"] = servers
 	}
 	return out
+}
+
+// emptyIfNil turns "no default route this port could describe" into the
+// empty dict real reports for it, rather than an absent key.
+func emptyIfNil(d map[string]any) map[string]any {
+	if d == nil {
+		return map[string]any{}
+	}
+	return d
 }
