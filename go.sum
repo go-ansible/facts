@@ -1,7 +1,7 @@
 github.com/Azure/go-ntlmssp v0.1.1 h1:l+FM/EEMb0U9QZE7mKNEDw5Mu3mFiaa2GKOoTSsNDPw=
 github.com/Azure/go-ntlmssp v0.1.1/go.mod h1:NYqdhxd/8aAct/s4qSYZEerdPuH1liG2/X9DiVTbhpk=
-github.com/go-remoteexec/transport v0.1.9 h1:ywVtd8nlSwta5NJk4YOQWZymwohYk8NQnxPavM97S+M=
-github.com/go-remoteexec/transport v0.1.9/go.mod h1:5gDnta+scYyI1Fxq7ozhpdxZXffW/9uyRXk6bxZhK8w=
+github.com/go-remoteexec/transport v0.2.0 h1:PWQWaW52C2iqGOJp7m912ggDhaKYebIUe7t8z1BqHYM=
+github.com/go-remoteexec/transport v0.2.0/go.mod h1:5gDnta+scYyI1Fxq7ozhpdxZXffW/9uyRXk6bxZhK8w=
 golang.org/x/crypto v0.57.0 h1:3ZVCjf8Ggz7zneR/EHRVx68Ctf+2pmIMP2UFhh9cC6M=
 golang.org/x/crypto v0.57.0/go.mod h1:Fdz0i5U6CoizGwLda9DttjSk6qlZo25zYNtR+ycvuZA=
 golang.org/x/sys v0.48.0 h1:bbX/i/6MgT9BVLM9RT1thmxL04yeTAhbEz4SyadbXoo=
