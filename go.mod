@@ -1,6 +1,6 @@
 module github.com/go-ansible/facts
 
-go 1.26.4
+go 1.27.1
 
 require github.com/go-remoteexec/transport v0.2.0
 
