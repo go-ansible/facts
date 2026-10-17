@@ -335,7 +335,16 @@ func GatherWith(ctx context.Context, conn remoteexec.Connection, opts Options) (
 	beforeLocal, localOut, _ := strings.Cut(beforeEnv, "\nFACTD ")
 	facts, ifconfigOut, _ := strings.Cut(beforeLocal, "\nIFC ")
 	out := assemble(parseKV(facts), ifconfigOut, parseEnv(res.Stdout))
-	out["ansible_local"] = parseLocalFacts(localOut)
+	// BARE, like every other key this package returns -- see the Gather
+	// doc: "system", not "ansible_system". It was "ansible_local" here,
+	// and vars.InjectFacts prefixes EVERY key, so the local facts were
+	// published as ansible_ansible_local and `ansible_local` was
+	// undefined. Measured: real gives
+	// ansible_local.demo.general.answer == "42" for a facts.d/demo.fact
+	// holding [general]\nanswer = 42, where this port had the same data
+	// under a name nothing would ever ask for -- and `ansible -m setup`
+	// emitted ansible_ansible_local too.
+	out["local"] = parseLocalFacts(localOut)
 	return out, nil
 }
 
